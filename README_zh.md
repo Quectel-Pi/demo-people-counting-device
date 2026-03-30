@@ -50,7 +50,7 @@
 
 ### 克隆代码
 ```bash
-git clone <repository-url>
+git clone https://github.com/Quectel-Pi/demo-people-counting-device.git
 cd demo-people-counting-device/
 ```
 

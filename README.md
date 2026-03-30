@@ -11,7 +11,7 @@ This project is a lightweight pedestrian flow monitoring device running on Quect
 - Support USB cameras, IP cameras, and local video files
 - Provide real-time counting, cumulative deduplicated counting, and in/out direction statistics
 
-[Interface Preview](assets/image.jpg)
+![Interface Preview](assets/image.jpg)
 
 
 ## ✨ Key Features
@@ -49,7 +49,7 @@ People Counting Device
 
 ### Clone Repository
 ```bash
-git clone <repository-url>
+git clone https://github.com/Quectel-Pi/demo-people-counting-device.git
 cd demo-people-counting-device/
 ```
 
