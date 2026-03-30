@@ -2,7 +2,7 @@
 
 [中文]| [English](README.md)
 
-## 🎯 项目概述
+## 项目概述
 
 本项目是一个运行在Quectel Pi H1智能主控板下的轻量级人流量统计设备，集成了目标检测、目标跟踪和行人重识别（ReID）技术，能够：
 
@@ -15,7 +15,7 @@
 ![界面预览](assets/image.jpg)
 
 
-## ✨ 主要特性
+## 主要特性
 
 ### 核心功能
 - **多源输入支持**：USB摄像头、ONVIF IP摄像头、本地视频文件
@@ -28,7 +28,7 @@
 - **ReID增强**：可选启用OSNet ReID模型，提升跟踪稳定性
 
 
-## 🏗️ 项目架构
+##  项目架构
 
 ```
 人流量统计设备
@@ -46,7 +46,7 @@
 │       └── reid_extractor.py     # OSNet ReID特征提取
 ```
 
-## 🔧 安装依赖
+## 安装依赖
 
 ### 克隆代码
 ```bash
@@ -60,7 +60,7 @@ cd demo-people-counting-device/
 pip3 install -r requirements.txt
 ```
 
-## 🤖 模型准备
+##  模型准备
 
 ### 目标检测模型
 项目支持以下YOLOv5n ONNX模型（位于 `src/` 目录）：
@@ -80,7 +80,7 @@ pip3 install -r requirements.txt
 
 > **注意**：ReID模型需要从Market1501等ReID数据集微调后的版本，不能直接使用ImageNet预训练模型。
 
-## 🚀 使用方法
+## 使用方法
 
 ### USB摄像头模式
 
@@ -116,7 +116,7 @@ python3 local_video_main.py --video test_video.mp4
 python3 local_video_main.py --video test_video.mp4 --model yolov5n_640.onnx
 ```
 
-## 📝 统计逻辑说明
+##  统计逻辑说明
 
 ### 三种计数类型
 1. **实时计数（Current Count）**：当前帧检测到的活跃人数
@@ -137,7 +137,7 @@ python3 local_video_main.py --video test_video.mp4 --model yolov5n_640.onnx
 - **水平线**：`direction='horizontal'`，`line_position=指定Y坐标`
 - **垂直线**：`direction='vertical'`，`line_position=指定X坐标`
 
-## ❓ 常见问题
+## 常见问题
 
 ### Q1: 摄像头无法打开
 

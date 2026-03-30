@@ -1,7 +1,7 @@
 # People Counting Device
 [English]| [中文](README_zh.md)
 
-## 🎯 Project Overview
+## Project Overview
 
 This project is a lightweight pedestrian flow monitoring device running on Quectel Pi H1 Smart Single-Board Computer, integrating object detection, object tracking, and person re-identification (ReID) technologies. It can:
 
@@ -14,7 +14,7 @@ This project is a lightweight pedestrian flow monitoring device running on Quect
 ![Interface Preview](assets/image.jpg)
 
 
-## ✨ Key Features
+##  Key Features
 
 ### Core Functions
 - **Multi-source Input Support**: USB cameras, ONVIF IP cameras, local video files
@@ -27,7 +27,7 @@ This project is a lightweight pedestrian flow monitoring device running on Quect
 - **ReID Enhancement**: Optional OSNet ReID model to improve tracking stability
 
 
-## 🏗️ Project Architecture
+##  Project Architecture
 
 ```
 People Counting Device
@@ -45,7 +45,7 @@ People Counting Device
 │       └── reid_extractor.py     # OSNet ReID feature extraction
 ```
 
-## 🔧 Installation Dependencies
+## Installation Dependencies
 
 ### Clone Repository
 ```bash
@@ -60,7 +60,7 @@ pip3 install -r requirements.txt
 ```
 
 
-## 🤖 Model Preparation
+## Model Preparation
 
 ### Object Detection Models
 The project supports the following YOLOv5n ONNX models (located in `src/` directory):
@@ -80,7 +80,7 @@ The project supports the following YOLOv5n ONNX models (located in `src/` direct
 
 > **Note**: The ReID model requires fine-tuning from ReID datasets like Market1501, and cannot directly use ImageNet pre-trained models.
 
-## 🚀 Usage Instructions
+## Usage Instructions
 
 ### USB Camera Mode
 
@@ -116,7 +116,7 @@ python3 local_video_main.py --video test_video.mp4
 python3 local_video_main.py --video test_video.mp4 --model yolov5n_640.onnx
 ```
 
-## 📝 Counting Logic Explanation
+##  Counting Logic Explanation
 
 ### Three Counting Types
 1. **Real-time Count**: Active people count in current frame
@@ -138,7 +138,7 @@ Although the current version uses default middle line, the `LineCounter` class s
 - **Vertical Line**: `direction='vertical'`, `line_position=specified X coordinate`
 
 
-## ❓ Common Issues
+##  Common Issues
 
 ### Q1: Camera Cannot Be Opened
 
