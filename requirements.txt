@@ -1,3 +1,10 @@
+# Use CPU-only PyTorch index (no NVIDIA/CUDA packages)
+--extra-index-url https://download.pytorch.org/whl/cpu
+
+# PyTorch (CPU-only)
+torch==2.13.0+cpu
+torchvision==0.28.0+cpu
+
 # Core computer vision and numerical libraries
 opencv-python==4.13.0.92
 numpy==2.2.6
@@ -6,8 +13,10 @@ numpy==2.2.6
 scipy==1.15.3
 
 # ONVIF camera discovery and control
-wsdiscovery==2.1.2
-onvif-zeep ==0.2.12
+onvif-zeep==0.2.12
+
+# YOLOv8 detection model
+ultralytics==8.4.45
 
 # Others
 requests==2.31.0 
