@@ -10,12 +10,10 @@ import argparse
 
 from bytetrack import BYTETracker  
 from line_counter import LineCounter
-
-FRAME_WIDTH = 1280
-FRAME_HEIGHT = 720
+from ultralytics import YOLO
 
 # Global variables for thread communication
-frame_queue = queue.Queue(maxsize=2)  # Queue to store frames for processing
+frame_queue = queue.Queue(maxsize=1)  # Keep only the newest frame to reduce tracking latency
 result_queue = queue.Queue(maxsize=1)  # Store latest processing result
 stop_event = threading.Event()
 
@@ -46,82 +44,34 @@ def letterbox(
 
     return img_padded, r, left, top
 
-def yolo_v5_person_infer(
+def yolo_person_infer(
     frame,
     net,
-    conf_thresh=0.25,
-    iou_thresh=0.45,
-    input_size=320
+    conf_thresh=0.35,
+    iou_thresh=0.35
 ):
     """
-    OpenCV DNN + YOLOv5n ONNX
+    YOLOv8 person detection
+    net: YOLO model instance
     return: list of [x1, y1, x2, y2, score]
     """
+    results = net.predict(frame, conf=conf_thresh, iou=iou_thresh, verbose=False)
 
-    img, scale, pad_w, pad_h = letterbox(frame, (input_size, input_size))
-    blob = cv2.dnn.blobFromImage(
-        img,
-        scalefactor=1 / 255.0,
-        size=(input_size, input_size),
-        swapRB=True,
-        crop=False
-    )
-
-    net.setInput(blob)
-    preds = net.forward()[0]   # shape: (25200, 85)
-
-    h0, w0 = frame.shape[:2]
-    boxes = []
-    scores = []
-
-    for det in preds:
-        obj_conf = det[4]
-        if obj_conf < conf_thresh:
-            continue
-
-        class_scores = det[5:]
-        class_id = np.argmax(class_scores)
-
-        # COCO: person == 0
-        if class_id != 0:
-            continue
-
-        score = obj_conf * class_scores[class_id]
-        if score < conf_thresh:
-            continue
-
-        cx, cy, w, h = det[:4]
-
-        # Restore coordinates to pre-letterbox dimensions
-        x = (cx - w / 2 - pad_w) / scale
-        y = (cy - h / 2 - pad_h) / scale
-        w = w / scale
-        h = h / scale
-
-        x1 = max(0, min(int(x), w0 - 1))
-        y1 = max(0, min(int(y), h0 - 1))
-        x2 = max(0, min(int(x + w), w0 - 1))
-        y2 = max(0, min(int(y + h), h0 - 1))
-
-        boxes.append([x1, y1, x2 - x1, y2 - y1])
-        scores.append(float(score))
-
-    if not boxes:
+    if not results:
         return []
 
-    indices = cv2.dnn.NMSBoxes(
-        boxes,
-        scores,
-        conf_thresh,
-        iou_thresh
-    )
+    result = results[0]
+    persons = []
 
-    results = []
-    for i in indices.flatten():
-        x, y, w, h = boxes[i]
-        results.append([x, y, x + w, y + h, scores[i]])
+    if result.boxes is not None:
+        for box in result.boxes:
+            # COCO class: person == 0
+            if int(box.cls[0]) == 0:
+                x1, y1, x2, y2 = box.xyxy[0].cpu().numpy()
+                conf = float(box.conf[0])
+                persons.append([int(x1), int(y1), int(x2), int(y2), conf])
 
-    return results
+    return persons
 
 def setup_video_capture(video_path):
     """Setup video capture from local video file"""
@@ -136,15 +86,103 @@ def setup_video_capture(video_path):
     
     return cap
 
+def get_screen_resolution():
+    """Get screen resolution for adaptive window sizing"""
+    try:
+        import subprocess
+        display = os.environ.get('DISPLAY', ':0')
+        # Try xrandr first
+        result = subprocess.run(['xrandr', '-d', display], 
+                              capture_output=True, text=True, timeout=2)
+        for line in result.stdout.split('\n'):
+            if 'connected primary' in line:
+                parts = line.split()
+                for part in parts:
+                    if 'x' in part and '+' in part:
+                        res = part.split('+')[0]
+                        w, h = map(int, res.split('x'))
+                        if w > 0 and h > 0:
+                            return w, h
+    except Exception:
+        pass
+    
+    # Try xdpyinfo as fallback
+    try:
+        import subprocess
+        result = subprocess.run(['xdpyinfo'], capture_output=True, text=True, timeout=2)
+        for line in result.stdout.split('\n'):
+            if 'dimensions' in line:
+                parts = line.split()
+                if len(parts) >= 2:
+                    res = parts[1]
+                    w, h = map(int, res.split('x'))
+                    if w > 0 and h > 0:
+                        return w, h
+    except Exception:
+        pass
+    
+    # Fallback to common resolutions (try smaller first to detect actual screen)
+    return 1280, 720
+
+def calculate_window_size(frame_width, frame_height, max_width=None, max_height=None):
+    """Calculate appropriate window size based on frame resolution and screen size"""
+    if max_width is None or max_height is None:
+        screen_w, screen_h = get_screen_resolution()
+        if max_width is None:
+            max_width = int(screen_w * 0.95)  # Use 95% of screen width for better display
+        if max_height is None:
+            max_height = int(screen_h * 0.90)  # Use 90% of screen height
+    
+    # Calculate scale to fit within max dimensions while maintaining aspect ratio
+    scale = min(max_width / frame_width, max_height / frame_height)
+    # Ensure minimum scale of 1.0 to avoid shrinking
+    scale = max(scale, 1.0)
+    
+    window_width = int(frame_width * scale)
+    window_height = int(frame_height * scale)
+    
+    return window_width, window_height
+
+def get_adaptive_font_scale(frame_width, reference_width=640):
+    """Calculate adaptive font scale based on frame width"""
+    # Ensure font scale is reasonable
+    scale = frame_width / reference_width
+    return max(0.8, scale * 0.7)  # Minimum 0.8, was 0.5
+
+def get_adaptive_position(base_x, base_y, frame_width, reference_width=640):
+    """Calculate adaptive text position based on frame width"""
+    scale = frame_width / reference_width
+    return (int(base_x * scale), int(base_y * scale))
+
+def get_adaptive_thickness(reference_thickness=2, frame_width=640):
+    """Calculate adaptive line thickness based on frame width"""
+    scale = max(1.0, frame_width / 640)
+    return max(1, int(reference_thickness * scale))
+
+def draw_text_with_background(frame, text, position, font_scale, color, thickness):
+    """Draw text with background rectangle for better visibility"""
+    font = cv2.FONT_HERSHEY_SIMPLEX
+    text_size = cv2.getTextSize(text, font, font_scale, thickness)[0]
+    x, y = position
+    
+    # Draw background rectangle
+    cv2.rectangle(frame, 
+                  (x - 3, y - text_size[1] - 5),
+                  (x + text_size[0] + 3, y + 3),
+                  (0, 0, 0), -1)  # Black background
+    
+    # Draw text
+    cv2.putText(frame, text, position, font, font_scale, color, thickness)
+
 def ai_processing_worker(net, actual_fps, frame_shape):
     """Worker thread for AI processing and tracking"""
     # Use ByteTrack for object tracking
     tracker = BYTETracker(
         track_thresh=0.2,      # Detection threshold for tracking
-        high_thresh=0.3,       # High confidence threshold
+        high_thresh=0.25,       # High confidence threshold
         low_thresh=0.05,        # Low confidence threshold 
         match_thresh=0.5,      # Matching threshold
-        track_buffer=60,       # Tracking buffer size
+        track_buffer=90,       # Tracking buffer size (increased for stability)
         frame_rate=actual_fps, # Frame rate
         use_reid=True,         # Enable ReID features
     )
@@ -172,7 +210,7 @@ def ai_processing_worker(net, actual_fps, frame_shape):
             frame, frame_id = frame_data
                 
             # Run person detection
-            persons = yolo_v5_person_infer(frame, net)
+            persons = yolo_person_infer(frame, net)
             # Call tracker.update() directly with frame for internal ReID feature extraction
             tracks = tracker.update(persons, frame=frame)
             
@@ -224,8 +262,8 @@ def main():
     parser = argparse.ArgumentParser(description='Pedestrian Flow Monitoring with Local Video File')
     parser.add_argument('--video', type=str, default='street.mp4', 
                        help='Path to local video file (default: street.mp4)')
-    parser.add_argument('--model', type=str, default='yolov5n_320.onnx',
-                       help='Path to YOLOv5 ONNX model (default: yolov5n_320.onnx)')
+    parser.add_argument('--model', type=str, default='yolov8n.pt',
+                       help='Path to YOLOv8 model (default: yolov8n.pt)')
     args = parser.parse_args()
 
     # Step 1: Setup video capture from local file
@@ -241,16 +279,16 @@ def main():
     print(f"  Frame dimensions: {actual_width}x{actual_height}")
     print(f"  Frame rate: {actual_fps:.2f} fps")
     
-    # Step 2: Load YOLOv5 model
+    # Step 2: Load YOLOv8 model
     try:
         if not os.path.exists(args.model):
             print(f"Model file not found: {args.model}")
             sys.exit(1)
             
-        net = cv2.dnn.readNetFromONNX(args.model)
-        print(f"YOLOv5 model loaded successfully from {args.model}")
+        net = YOLO(args.model)
+        print(f"YOLOv8 model loaded successfully from {args.model}")
     except Exception as e:
-        print(f"Failed to load YOLOv5 model: {e}")
+        print(f"Failed to load YOLOv8 model: {e}")
         sys.exit(1)
     
     # Step 3: Start AI processing worker thread
@@ -264,8 +302,10 @@ def main():
     print("Press 'ESC' to exit")
 
     # Set window properties
-    cv2.namedWindow("People Counting Device", cv2.WINDOW_NORMAL)
-    cv2.resizeWindow("People Counting Device", FRAME_WIDTH, FRAME_HEIGHT)
+    cv2.namedWindow("People Counting Device", cv2.WINDOW_GUI_NORMAL)
+    window_width, window_height = calculate_window_size(actual_width, actual_height)
+    print(f"  Window size: {window_width}x{window_height}")
+    cv2.resizeWindow("People Counting Device", window_width, window_height)
 
     frame_id = 0
     last_processed_frame_id = -1
@@ -328,9 +368,11 @@ def main():
 
                 # Draw detection boxes
                 for x1, y1, x2, y2, track_id in tracks:
-                    cv2.rectangle(display_frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
+                    thickness = get_adaptive_thickness(2, display_frame.shape[1])
+                    cv2.rectangle(display_frame, (x1, y1), (x2, y2), (0, 255, 0), thickness)
+                    font_scale = get_adaptive_font_scale(display_frame.shape[1])
                     cv2.putText(display_frame, f"ID:{track_id}", (x1, y1-5),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1)
+                    cv2.FONT_HERSHEY_SIMPLEX, font_scale, (0, 255, 0), max(1, int(font_scale * 2)))
                 # for x1, y1, x2, y2, score in persons:
                 #     cv2.rectangle(display_frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
                 #     cv2.putText(
@@ -343,19 +385,31 @@ def main():
                 #         1
                 #     )
                 
-                # Display counting statistics
-                cv2.putText(display_frame, f"Current: {current_count}", (20, 80),
-                             cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
-                cv2.putText(display_frame, f"In: {in_count}", (20, 110),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
-                cv2.putText(display_frame, f"Out: {out_count}", (20, 140),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
-                cv2.putText(display_frame, f"Total: {total_count}", (20, 170),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 0), 2)
+                # Display counting statistics with adaptive font size and position
+                font_scale = get_adaptive_font_scale(display_frame.shape[1])
+                thickness = max(1, int(font_scale * 2))
+                
+                # Use larger base positions and better spacing to avoid overlap
+                pos1 = (20, 40)
+                draw_text_with_background(display_frame, f"Current: {current_count}", pos1,
+                             font_scale, (0, 255, 255), thickness)
+                
+                pos2 = (20, 40 + 40)
+                draw_text_with_background(display_frame, f"In: {in_count}", pos2,
+                            font_scale, (0, 255, 0), thickness)
+                
+                pos3 = (20, 40 + 80)
+                draw_text_with_background(display_frame, f"Out: {out_count}", pos3,
+                            font_scale, (0, 0, 255), thickness)
+                
+                pos4 = (20, 40 + 120)
+                draw_text_with_background(display_frame, f"Total: {total_count}", pos4,
+                            font_scale, (255, 255, 0), thickness)
                 
                 # Draw virtual line
                 line_y = frame_shape[0] // 2
-                cv2.line(display_frame, (0, line_y), (display_frame.shape[1], line_y), (255, 0, 0), 2)
+                thickness = get_adaptive_thickness(2, display_frame.shape[1])
+                cv2.line(display_frame, (0, line_y), (display_frame.shape[1], line_y), (255, 0, 0), thickness)
                 
                 last_display_frame = display_frame.copy()
                 cv2.imshow("People Counting Device", display_frame)
@@ -374,6 +428,20 @@ def main():
 
             # Add delay to match video's original frame rate
             key = cv2.waitKey(frame_delay_ms) & 0xFF
+
+            # Support closing window via title-bar close button.
+            # On some OpenCV Qt backends, querying a destroyed window raises cv2.error.
+            try:
+                win_visible = cv2.getWindowProperty("People Counting Device", cv2.WND_PROP_VISIBLE)
+                if win_visible < 1:
+                    print("Window closed by user")
+                    stop_event.set()
+                    break
+            except cv2.error:
+                print("Window closed by user")
+                stop_event.set()
+                break
+
             if key == 27:  # ESC
                 print("Exit requested by user")
                 stop_event.set()

@@ -18,7 +18,7 @@ This project is a lightweight pedestrian flow monitoring device running on Quect
 
 ### Core Functions
 - **Multi-source Input Support**: USB cameras, ONVIF IP cameras, local video files
-- **Real-time Object Detection**: Based on YOLOv5n ONNX model, supporting multiple input sizes (320/416/640)
+- **Real-time Object Detection**: Based on YOLOv8n model, supporting multiple input sizes
 - **Stable Object Tracking**: Integrated ByteTrack algorithm, effectively handling occlusion and target loss scenarios
 - **Intelligent Person Counting**:
   - Real-time counting (number of people in current frame)
@@ -55,7 +55,6 @@ cd demo-people-counting-device/
 
 ### Python Dependencies
 ```bash
-# Install project dependencies
 pip3 install -r requirements.txt
 ```
 
@@ -63,13 +62,7 @@ pip3 install -r requirements.txt
 ## Model Preparation
 
 ### Object Detection Models
-The project supports the following YOLOv5n ONNX models (located in `src/` directory):
-
-| Model File | Input Size | Features |
-|-----------|------------|----------|
-| `yolov5n_320.onnx` | 320×320 | Fastest speed, slightly lower accuracy (default  mode) |
-| `yolov5n_416.onnx` | 416×416 | Balanced speed and accuracy |
-| `yolov5n_640.onnx` | 640×640 | Highest accuracy, slower speed |
+The project supports YOLOv8n ONNX models (located in `src/` directory):
 
 > **Note**: All model files are included in the project and located in the `src/` directory, no additional download required.
 
@@ -93,7 +86,7 @@ python3 usb_camera_main.py
 
 ```bash
 cd ~/demo-people-counting-device/src  
-python3 ip_camera_main.p
+python3 ip_camera_main.py
 ```
 
 ### Local Video File Testing
@@ -105,16 +98,36 @@ python3 local_video_main.py --video ../asset/street.mp4
 
 **Command-line Arguments:**
 - `--video`: Specify video file path (required)
-- `--model`: Specify YOLO model path (optional, defaults to `yolov5n_320.onnx`)
+- `--model`: Specify YOLO model path (optional, defaults to `yolov8n.pt`)
 
 **Examples:**
 ```bash
-# Process video with default model
 python3 local_video_main.py --video test_video.mp4
-
-# Specify high-accuracy model
-python3 local_video_main.py --video test_video.mp4 --model yolov5n_640.onnx
 ```
+
+## Deployment Recommendations
+
+### Camera Installation Position
+- It is recommended to install the camera above or beside the passage, ensuring the lens covers the full movement area so the same person remains visible when entering and leaving the counting zone.
+- Recommended installation height is 2.2 to 3.5 meters (for ceiling mounting, aim the lens straight downward). If mounted too low, occlusion and truncated lower-body visibility are more likely.
+- Avoid glass, reflective walls, and strong backlight behind the subject, as these can cause glare or partial obstruction.
+- Keep large pillars, shelves, or plants away from the counting line to avoid temporary occlusion.
+
+### Orientation and Angle Recommendations
+- Prefer a slightly downward front-facing view, with a pitch angle of about 15° to 45°. A view that is too flat increases occlusion, while one that is too steep compresses people into small targets.
+- If installed sideways, keep the movement direction close to the camera's optical axis to avoid incomplete contours when people pass edge-on.
+- Place the counting line near the middle of the frame and keep the camera angle stable to avoid shaking or frequent rotation.
+
+### Lighting Recommendations
+- Use uniform and soft front lighting so people can be clearly detected without strong shadows.
+- Avoid backlight, strong side light, and direct sunlight entering the lens, as these can degrade detection and tracking.
+- For nighttime use, add fill lights or infrared lights and keep illumination stable to avoid flicker and large brightness changes.
+- When the scene is too dark, has excessive contrast, or contains strong highlights, the miss-detection and false-detection rates will increase.
+
+### Impact of Different Deployment Methods on Algorithm Performance
+- USB camera: Deployed locally, with low latency and stable image quality, it is usually the best choice for real-time counting and on-site debugging.
+- IP camera: Performance is affected by network bandwidth, encoding format, transmission packet loss, and image compression. Low resolution, low bitrate, or unstable frame rate can reduce detection and tracking quality.
+- Local video files: Suitable for algorithm validation and offline testing, but compared with real on-site deployment, encoding, frame rate, and playback conditions may affect results and are not fully equivalent to live camera scenarios.
 
 ##  Counting Logic Explanation
 
@@ -133,7 +146,7 @@ python3 local_video_main.py --video test_video.mp4 --model yolov5n_640.onnx
   - Each track_id is counted only once to prevent duplicate counting
 
 ### Virtual Line Customization
-Although the current version uses default middle line, the `LineCounter` class supports custom virtual line position and direction:
+The current version uses default middle line and supports custom virtual line position and direction:
 - **Horizontal Line**: `direction='horizontal'`, `line_position=specified Y coordinate`
 - **Vertical Line**: `direction='vertical'`, `line_position=specified X coordinate`
 

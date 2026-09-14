@@ -1,6 +1,5 @@
 #!/usr/bin/env python3
 import cv2
-import numpy as np
 import os
 import sys
 import threading
@@ -8,14 +7,36 @@ import queue
 import traceback
 from bytetrack import BYTETracker  
 from line_counter import LineCounter
-
-FRAME_WIDTH = 1280
-FRAME_HEIGHT = 720
+from ultralytics import YOLO
 
 # Global variables for thread communication
-frame_queue = queue.Queue(maxsize=5)
-result_queue = queue.Queue(maxsize=2)
+frame_queue = queue.Queue(maxsize=1)  # Keep only the newest frame to reduce tracking latency
+result_queue = queue.Queue(maxsize=1)  # Store latest processing result
 stop_event = threading.Event()
+WINDOW_NAME = "People Counting Device"
+TARGET_WIDTH = 1280
+TARGET_HEIGHT = 720
+TARGET_FPS = 15
+OVERLAY_STYLE = {
+    "font_scale": 0.8,
+    "text_thickness": 2,
+    "line_thickness": 2,
+    "box_thickness": 2,
+    "margin": 20,
+    "row_gap": 32,
+}
+
+def get_fourcc_str(fourcc_value):
+    """Convert OpenCV FOURCC numeric value to readable 4-char string."""
+    value = int(fourcc_value)
+    return "".join([chr((value >> 8 * i) & 0xFF) for i in range(4)])
+
+def apply_camera_mode(cap, fourcc, width, height, fps):
+    """Apply camera mode preferences."""
+    cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*fourcc))
+    cap.set(cv2.CAP_PROP_FRAME_WIDTH, width)
+    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, height)
+    cap.set(cv2.CAP_PROP_FPS, fps)
 
 def find_available_camera():
     """Automatically detect available camera"""
@@ -43,121 +64,85 @@ def find_available_camera():
     return None
 
 def setup_usb_camera(camera_index):
-    """Setup USB camera with optimal settings"""
-    cap = cv2.VideoCapture(camera_index)
+    """Setup USB camera with fixed 1280x720@15 settings."""
+    cap = cv2.VideoCapture(camera_index, cv2.CAP_V4L2)
+    if not cap.isOpened():
+        cap = cv2.VideoCapture(camera_index)
     
     # Set buffer size to minimize latency
     cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
-    
-    # Try to set reasonable resolution (lower resolution for better performance on Pi)
-    cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
-    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
+
+    # Force a single capture mode to avoid branchy fallback behavior.
+    apply_camera_mode(cap, "MJPG", TARGET_WIDTH, TARGET_HEIGHT, TARGET_FPS)
     
     return cap
 
-def letterbox(
-    img,
-    new_shape=(360, 240),
-    color=(114, 114, 114),
-):
-    h, w = img.shape[:2]
-    new_w, new_h = new_shape
+def draw_stats_panel(frame, current_count, in_count, out_count, total_count, style):
+    """Draw a fixed stats panel so text never covers the whole frame."""
+    lines = [
+        (f"Current: {current_count}", (0, 255, 255)),
+        (f"In: {in_count}", (0, 255, 0)),
+        (f"Out: {out_count}", (0, 0, 255)),
+        (f"Total: {total_count}", (255, 255, 0)),
+    ]
+    font = cv2.FONT_HERSHEY_SIMPLEX
+    font_scale = style['font_scale']
+    text_thickness = style['text_thickness']
+    margin = style['margin']
+    row_gap = style['row_gap']
 
-    r = min(new_w / w, new_h / h)
-    nw, nh = int(round(w * r)), int(round(h * r))
+    max_text_width = 0
+    text_height = 0
+    for text, _ in lines:
+        size = cv2.getTextSize(text, font, font_scale, text_thickness)[0]
+        max_text_width = max(max_text_width, size[0])
+        text_height = max(text_height, size[1])
 
-    img_resized = cv2.resize(img, (nw, nh))
+    panel_w = max_text_width + margin * 2
+    panel_h = row_gap * len(lines) + margin
+    x0 = margin
+    y0 = margin
+    x1 = min(frame.shape[1] - 1, x0 + panel_w)
+    y1 = min(frame.shape[0] - 1, y0 + panel_h)
 
-    pad_w = new_w - nw
-    pad_h = new_h - nh
-    top = pad_h // 2
-    bottom = pad_h - top
-    left = pad_w // 2
-    right = pad_w - left
+    overlay = frame.copy()
+    cv2.rectangle(overlay, (x0, y0), (x1, y1), (0, 0, 0), -1)
+    cv2.addWeighted(overlay, 0.45, frame, 0.55, 0, frame)
 
-    img_padded = cv2.copyMakeBorder(
-        img_resized, top, bottom, left, right,
-        cv2.BORDER_CONSTANT, value=color
-    )
+    y = y0 + margin + text_height
+    for text, color in lines:
+        cv2.putText(frame, text, (x0 + margin // 2, y), font, font_scale, color, text_thickness)
+        y += row_gap
 
-    return img_padded, r, left, top
-
-def yolo_v5_person_infer(
+def yolo_person_infer(
     frame,
     net,
-    conf_thresh=0.25,
-    iou_thresh=0.45,
-    input_size=320
+    conf_thresh=0.35,
+    iou_thresh=0.35,
 ):
     """
-    OpenCV DNN + YOLOv5n ONNX
+    YOLOv8 person detection
+    net: YOLO model instance
     return: list of [x1, y1, x2, y2, score]
     """
-
-    img, scale, pad_w, pad_h = letterbox(frame, (input_size, input_size))
-    blob = cv2.dnn.blobFromImage(
-        img,
-        scalefactor=1 / 255.0,
-        size=(input_size, input_size),
-        swapRB=True,
-        crop=False
-    )
-
-    net.setInput(blob)
-    preds = net.forward()[0]   # shape: (25200, 85)
-
-    h0, w0 = frame.shape[:2]
-    boxes = []
-    scores = []
-
-    for det in preds:
-        obj_conf = det[4]
-        if obj_conf < conf_thresh:
-            continue
-
-        class_scores = det[5:]
-        class_id = np.argmax(class_scores)
-
-        # COCO: person == 0
-        if class_id != 0:
-            continue
-
-        score = obj_conf * class_scores[class_id]
-        if score < conf_thresh:
-            continue
-
-        cx, cy, w, h = det[:4]
-
-        # Restore coordinates to pre-letterbox dimensions
-        x = (cx - w / 2 - pad_w) / scale
-        y = (cy - h / 2 - pad_h) / scale
-        w = w / scale
-        h = h / scale
-
-        x1 = max(0, min(int(x), w0 - 1))
-        y1 = max(0, min(int(y), h0 - 1))
-        x2 = max(0, min(int(x + w), w0 - 1))
-        y2 = max(0, min(int(y + h), h0 - 1))
-
-        boxes.append([x1, y1, x2 - x1, y2 - y1])
-        scores.append(float(score))
-
-    if not boxes:
+    results = net.predict(frame, conf=conf_thresh, iou=iou_thresh, verbose=False)
+    
+    if not results:
         return []
-
-    indices = cv2.dnn.NMSBoxes(
-        boxes,
-        scores,
-        conf_thresh,
-        iou_thresh
-    )
-
-    results = []
-    for i in indices.flatten():
-        x, y, w, h = boxes[i]
-        results.append([x, y, x + w, y + h, scores[i]])
-
-    return results
+    
+    result = results[0]
+    persons = []
+    
+    # Extract boxes and process
+    if result.boxes is not None:
+        for box in result.boxes:
+            # COCO class: person == 0
+            if int(box.cls[0]) == 0:
+                x1, y1, x2, y2 = box.xyxy[0].cpu().numpy()
+                conf = float(box.conf[0])
+                persons.append([int(x1), int(y1), int(x2), int(y2), conf])
+    
+    return persons
 
 def ai_processing_worker(net, actual_fps):
     """Worker thread for AI processing and tracking"""
@@ -167,7 +152,7 @@ def ai_processing_worker(net, actual_fps):
         high_thresh=0.25,       # High confidence threshold
         low_thresh=0.05,        # Low confidence threshold (key feature of ByteTrack: utilizing low-scoring detections)
         match_thresh=0.5,      # Matching threshold
-        track_buffer=60,       # Tracking buffer size
+        track_buffer=90,       # Tracking buffer size (increased for stability)
         frame_rate=actual_fps, # Frame rate
         use_reid=True,         # Enable ReID features
     )
@@ -197,14 +182,14 @@ def ai_processing_worker(net, actual_fps):
             frame, frame_id = frame_data
                 
             # Run person detection
-            persons = yolo_v5_person_infer(frame, net)
+            persons = yolo_person_infer(frame, net)
                 
             # Call tracker.update() directly with frame for internal ReID feature extraction
             tracks = tracker.update(persons, frame=frame)
+            frame_shape = (frame.shape[0], frame.shape[1])
             
             # Initialize counter on first frame processing with proper frame_shape
             if counter is None:
-                frame_shape = (frame.shape[0], frame.shape[1])
                 counter = LineCounter(line_position=None, direction='horizontal')
 
             # Update counter with frame_shape for virtual line positioning
@@ -215,7 +200,6 @@ def ai_processing_worker(net, actual_fps):
             try:
                 result_queue.put_nowait({
                     'frame': frame,
-                    'persons': persons,
                     'tracks': tracks,
                     'total_count': total_count,
                     'current_count': current_count,
@@ -229,7 +213,6 @@ def ai_processing_worker(net, actual_fps):
                     result_queue.get_nowait()
                     result_queue.put_nowait({
                         'frame': frame,
-                        'persons': persons,
                         'tracks': tracks,
                         'total_count': total_count,
                         'current_count': current_count,
@@ -261,30 +244,44 @@ def main():
     if not cap.isOpened():
         print("Failed to open USB camera")
         sys.exit(1)
+
+    # Read one frame first to get real USB camera output size.
+    ret, first_frame = cap.read()
+    if not ret:
+        print("Failed to read initial frame from USB camera")
+        cap.release()
+        sys.exit(1)
     
-    # Get actual frame dimensions
-    actual_width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-    actual_height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    # Validate real output mode from camera.
+    actual_width = first_frame.shape[1]
+    actual_height = first_frame.shape[0]
     actual_fps = cap.get(cv2.CAP_PROP_FPS) or 30.0  # Default to 30 if not available
+    actual_fourcc = get_fourcc_str(cap.get(cv2.CAP_PROP_FOURCC))
+    overlay_style = OVERLAY_STYLE
+    resize_to_target = (actual_width != TARGET_WIDTH or actual_height != TARGET_HEIGHT)
+
+    if resize_to_target:
+        print(f"Camera stream is {actual_width}x{actual_height}, expected {TARGET_WIDTH}x{TARGET_HEIGHT}")
+        print("Using resize-to-1280x720 pipeline to keep processing stable.")
+        first_frame = cv2.resize(first_frame, (TARGET_WIDTH, TARGET_HEIGHT), interpolation=cv2.INTER_LINEAR)
     
     print(f"  Frame dimensions: {actual_width}x{actual_height}")
     print(f"  Frame rate: {actual_fps:.2f} fps")
+    print(f"  Pixel format: {actual_fourcc}")
     
-    # Step 3: Load YOLOv5 model
-    print("\nLoading YOLOv5 model...")
+    # Step 3: Load YOLOv8 model
+    print("\nLoading YOLOv8 model...")
     try:
-        # - "yolov5n_320.onnx": Smaller and faster, slightly lower precision
-        # - "yolov5n_416.onnx": Balances speed and precision (default)
-        # - "yolov5n_640.onnx": Higher precision, but slower speed
-        model_path  = "yolov5n_320.onnx"
+        # YOLOv8n is the nano model: lightweight and fast
+        model_path = "yolov8n.pt"
         if not os.path.exists(model_path):
             print(f"Model file not found: {model_path}")
             sys.exit(1)
         
-        net = cv2.dnn.readNetFromONNX(model_path)
-        print(f"YOLOv5 model loaded successfully from {model_path}")
+        net = YOLO(model_path)
+        print(f"YOLOv8 model loaded successfully from {model_path}")
     except Exception as e:
-        print(f"Failed to load YOLOv5 model: {e}")
+        print(f"Failed to load YOLOv8 model: {e}")
         sys.exit(1)
     
     # Step 4: Start AI processing worker thread
@@ -297,21 +294,25 @@ def main():
     print("\nStarting pedestrian flow monitoring with USB camera...")
     print("Press 'ESC' to exit")
 
-    # Set window properties
-    cv2.namedWindow("People Counting Device", cv2.WINDOW_NORMAL)
-    cv2.resizeWindow("People Counting Device", FRAME_WIDTH, FRAME_HEIGHT)
+    # Use fixed display window size to match fixed stream size.
+    cv2.namedWindow(WINDOW_NAME, cv2.WINDOW_GUI_NORMAL)
+    cv2.resizeWindow(WINDOW_NAME, TARGET_WIDTH, TARGET_HEIGHT)
+    print(f"  Window size: {TARGET_WIDTH}x{TARGET_HEIGHT}")
 
     frame_id = 0
-    last_processed_frame_id = -1
+    frame = first_frame
     last_display_frame = None
-    startup_phase = True
 
     try:
         while not stop_event.is_set():
-            ret, frame = cap.read()
-            if not ret:
-                print("Failed to read frame from USB camera")
-                break
+            if frame_id > 0:
+                ret, frame = cap.read()
+                if not ret:
+                    print("Failed to read frame from USB camera")
+                    break
+
+            if resize_to_target:
+                frame = cv2.resize(frame, (TARGET_WIDTH, TARGET_HEIGHT), interpolation=cv2.INTER_LINEAR)
 
             # Ensure the queue always has the latest frame
             try:
@@ -343,58 +344,80 @@ def main():
             except queue.Empty:
                 pass
 
-            # Display logic optimization
-            if result is not None and result['frame_id'] >= last_processed_frame_id:
+            # Display latest AI result when available.
+            if result is not None:
                 # Build annotated display frame
                 display_frame = result['frame'].copy()
-                persons = result['persons']
                 tracks = result['tracks']
                 total_count = result['total_count']
                 current_count = result['current_count']
                 in_count = result['in_count']
                 out_count = result['out_count']
-                current_frame_id = result['frame_id']
-                last_processed_frame_id = current_frame_id
 
                 # Draw detection boxes
                 for track in tracks:
                     # Handle both old format (5 elements) and new format (6+ elements)
                     if len(track) >= 5:
                         x1, y1, x2, y2, track_id = track[:5]
-                        cv2.rectangle(display_frame, (int(x1), int(y1)), (int(x2), int(y2)), (0, 255, 0), 2)
-                        cv2.putText(display_frame, f"ID:{int(track_id)}", (int(x1), int(y1)-5),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1)
+                        cv2.rectangle(
+                            display_frame,
+                            (int(x1), int(y1)),
+                            (int(x2), int(y2)),
+                            (0, 255, 0),
+                            overlay_style['box_thickness']
+                        )
+                        cv2.putText(
+                            display_frame,
+                            f"ID:{int(track_id)}",
+                            (int(x1), max(15, int(y1) - 8)),
+                            cv2.FONT_HERSHEY_SIMPLEX,
+                            max(0.45, overlay_style['font_scale'] * 0.7),
+                            (0, 255, 0),
+                            max(1, overlay_style['text_thickness'])
+                        )
                 
                 # Draw virtual line (horizontal line at middle of frame)
                 line_y = display_frame.shape[0] // 2
-                cv2.line(display_frame, (0, line_y), (display_frame.shape[1], line_y), (255, 0, 0), 2)
+                cv2.line(
+                    display_frame,
+                    (0, line_y),
+                    (display_frame.shape[1], line_y),
+                    (255, 0, 0),
+                    overlay_style['line_thickness']
+                )
                 
-                # Display counting statistics
-                cv2.putText(display_frame, f"Current Count: {current_count}", (20, 80),
-                             cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
-                cv2.putText(display_frame, f"In: {in_count}", (20, 110),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
-                cv2.putText(display_frame, f"Out: {out_count}", (20, 140),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
-                cv2.putText(display_frame, f"Total Count: {total_count}", (20, 170),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 0), 2)
+                draw_stats_panel(
+                    display_frame,
+                    current_count,
+                    in_count,
+                    out_count,
+                    total_count,
+                    overlay_style,
+                )
+                last_display_frame = display_frame
 
-                # Update cache and display
-                last_display_frame = display_frame.copy()
-                cv2.imshow("People Counting Device", display_frame)
-                startup_phase = False
-                
+            # Keep showing the last annotated frame to avoid flicker.
+            if last_display_frame is not None:
+                cv2.imshow(WINDOW_NAME, last_display_frame)
             else:
-                # During startup phase or when no new results, show current raw frame
-                if startup_phase:
-                    cv2.imshow("People Counting Device", frame)
-                else:
-                    if last_display_frame is not None:
-                        cv2.imshow("People Counting Device", last_display_frame)
-                    else:
-                        cv2.imshow("People Counting Device", frame)
+                # During AI startup, show raw frame.
+                cv2.imshow(WINDOW_NAME, frame)
 
             key = cv2.waitKey(1) & 0xFF
+
+            # Support closing window via title-bar close button.
+            # On some OpenCV Qt backends, querying a destroyed window raises cv2.error.
+            try:
+                win_visible = cv2.getWindowProperty(WINDOW_NAME, cv2.WND_PROP_VISIBLE)
+                if win_visible < 1:
+                    print("Window closed by user")
+                    stop_event.set()
+                    break
+            except cv2.error:
+                print("Window closed by user")
+                stop_event.set()
+                break
+
             if key == 27:  # ESC
                 print("Exit requested by user")
                 stop_event.set()
