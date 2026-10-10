@@ -13,6 +13,11 @@ from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
 from urllib.parse import urlparse, quote
+# CPU-only inference on this board: give torch 4 threads instead of ultralytics' fallback of
+# 1 (ultralytics sets OMP_NUM_THREADS=1 when it is unset). Must run before torch import.
+# Override with OMP_NUM_THREADS=<n>.  Measured: ~1.6x faster worker iterations.
+os.environ.setdefault("OMP_NUM_THREADS", "4")
+
 from bytetrack import BYTETracker  
 from line_counter import LineCounter
 from ultralytics import YOLO
@@ -495,7 +500,10 @@ def ai_processing_worker(net, actual_fps):
     if low_thresh >= high_thresh:
         low_thresh = max(0.01, high_thresh - 0.1)
 
-    # ReID ONNX may fail on some OpenCV builds; keep it optional and enabled by default.
+    # ReID ONNX may fail on some OpenCV builds; keep it optional. Default ON on this board:
+    # the per-box ReID cost (~32 ms, ~0.6 s for 17 people) delays the whole iteration on CPU-only
+    # inference, which made the drawn boxes ~1.4 s stale -- it *looked* like missed detections.
+    # BYTETRACK_USE_REID=0 disables it to reduce latency (pair it with REID_SKIP_FRAMES=1 when re-enabling).
     use_reid = os.getenv("BYTETRACK_USE_REID", "1").lower() in ("1", "true", "yes")
     try:
         tracker = BYTETracker(
@@ -721,6 +729,9 @@ def main():
     last_tracks = None         # Latest tracking results for overlay
     last_counts = (0, 0, 0, 0) # (current, total, in, out)
     startup_phase = True  # Startup phase flag
+    # DISPLAY_LATEST_FRAME=1 (default here) draws the overlay on the freshest captured frame so
+    # the picture keeps the source frame rate; DISPLAY_LATEST_FRAME=0 = upstream behaviour.
+    display_latest = os.getenv("DISPLAY_LATEST_FRAME", "1").lower() in ("1", "true", "yes")
 
     try:
         while not stop_event.is_set():
@@ -764,8 +775,11 @@ def main():
                                result['in_count'], result['out_count'])
                 startup_phase = False
 
-            # Draw overlays on the exact frame used by tracker output to avoid visual box lag.
-            if last_processed_frame is not None:
+            # Draw overlays on the frame chosen above (freshest captured frame when
+            # DISPLAY_LATEST_FRAME=1, otherwise the frame the tracker produced).
+            if display_latest:
+                display_frame = frame.copy()
+            elif last_processed_frame is not None:
                 display_frame = last_processed_frame.copy()
             else:
                 display_frame = frame.copy()

@@ -8,6 +8,11 @@ import queue
 import traceback
 import argparse
 
+# CPU-only inference on this board: give torch 4 threads instead of ultralytics' fallback of
+# 1 (ultralytics sets OMP_NUM_THREADS=1 when it is unset). Must run before torch import.
+# Override with OMP_NUM_THREADS=<n>.  Measured: ~1.6x faster worker iterations.
+os.environ.setdefault("OMP_NUM_THREADS", "4")
+
 from bytetrack import BYTETracker  
 from line_counter import LineCounter
 from ultralytics import YOLO
@@ -174,8 +179,33 @@ def draw_text_with_background(frame, text, position, font_scale, color, thicknes
     # Draw text
     cv2.putText(frame, text, position, font, font_scale, color, thickness)
 
+def _env_int(name, default, lo, hi):
+    """Read an int env var clamped to [lo, hi] — same knob convention as ip_camera_main.py."""
+    try:
+        return max(lo, min(hi, int(os.getenv(name, str(default)))))
+    except (TypeError, ValueError):
+        return default
+
+
 def ai_processing_worker(net, actual_fps, frame_shape):
     """Worker thread for AI processing and tracking"""
+    # Runtime knobs — same env names as ip_camera_main.py, so one command line works for every
+    # mode. Defaults are the values measured on Quectel Pi M2 (RK3576, CPU-only inference):
+    # a plain `python3 <entry>.py` is smooth AND accurate out of the box (accuracy-first:
+    # these are the best values the accuracy probe measured).
+    #   BYTETRACK_USE_REID=0   disable ReID appearance matching   (default 1 on this board)
+    #   REID_SKIP_FRAMES=N     run ReID every N frames             (default 1 when ReID is on)
+    #   INFER_SKIP_FRAMES=N    run YOLO every N frames             (default 1 = every iteration)
+    # Defaults are accuracy-first (measured 2026-10-03 on M2): recycling detections or starving
+    # the tracker of appearance features made the drawn boxes up to 1.4 s stale and raised
+    # track-id churn ~40%, which reads as a lower detection rate. Reclaim speed with
+    # OMP_NUM_THREADS instead of skipping work.
+    # upstream equivalent: BYTETRACK_USE_REID=1 REID_SKIP_FRAMES=1 INFER_SKIP_FRAMES=1
+    use_reid = os.getenv("BYTETRACK_USE_REID", "1").lower() in ("1", "true", "yes")
+    infer_skip_frames = _env_int("INFER_SKIP_FRAMES", 1, 1, 15)
+    reid_skip_frames = _env_int("REID_SKIP_FRAMES", 1, 1, 30)
+    last_persons = []
+    frame_count = 0
     # Use ByteTrack for object tracking
     tracker = BYTETracker(
         track_thresh=0.2,      # Detection threshold for tracking
@@ -184,7 +214,7 @@ def ai_processing_worker(net, actual_fps, frame_shape):
         match_thresh=0.5,      # Matching threshold
         track_buffer=90,       # Tracking buffer size (increased for stability)
         frame_rate=actual_fps, # Frame rate
-        use_reid=True,         # Enable ReID features
+        use_reid=use_reid,     # Enable ReID features
     )
     
     counter = None
@@ -210,9 +240,14 @@ def ai_processing_worker(net, actual_fps, frame_shape):
             frame, frame_id = frame_data
                 
             # Run person detection
-            persons = yolo_person_infer(frame, net)
-            # Call tracker.update() directly with frame for internal ReID feature extraction
-            tracks = tracker.update(persons, frame=frame)
+            # Run person detection (skipped frames reuse the previous detections)
+            if frame_count % infer_skip_frames == 0:
+                last_persons = yolo_person_infer(frame, net)
+            persons = last_persons
+            frame_count += 1
+            # Pass the frame only on ReID frames (None = skip ReID on this frame)
+            frame_for_reid = frame if (use_reid and frame_count % reid_skip_frames == 0) else None
+            tracks = tracker.update(persons, frame=frame_for_reid)
             
             # Initialize counter on first frame processing
             if counter is None:
@@ -310,6 +345,13 @@ def main():
     frame_id = 0
     last_processed_frame_id = -1
     last_display_frame = None  # Cache the last displayed annotated frame
+    # DISPLAY_LATEST_FRAME=1 (default) annotates the freshest captured frame every iteration
+    # (overlay from the newest AI result) so the picture keeps the source frame rate even when
+    # inference runs slower than the stream. Set it to 0 for the upstream behaviour (annotate the
+    # AI-processed frame, i.e. the picture then advances at the AI rate ≈1-2 fps on this board).
+    display_latest = os.getenv("DISPLAY_LATEST_FRAME", "1").lower() in ("1", "true", "yes")
+    last_tracks = None
+    last_counts = (0, 0, 0, 0)
     startup_phase = True  # Startup phase flag
     
     # Calculate delay between frames based on actual FPS
@@ -355,16 +397,20 @@ def main():
                 pass
 
             if result is not None and result['frame_id'] >= last_processed_frame_id:
-                display_frame = result['frame'].copy()
-                persons = result['persons']
-                tracks = result['tracks']
-                total_count = result['total_count']
-                current_count = result['current_count']
-                in_count = result['in_count']
-                out_count = result['out_count']
-                current_frame_id = result['frame_id']
+                # Cache the newest AI result (re-drawn on a fresher frame when
+                # DISPLAY_LATEST_FRAME=1).
+                last_tracks = result['tracks']
+                last_counts = (result['current_count'], result['in_count'],
+                               result['out_count'], result['total_count'])
                 # Update last processed frame ID
-                last_processed_frame_id = current_frame_id
+                last_processed_frame_id = result['frame_id']
+
+            # Draw the overlay. Default base = the AI-processed frame; with
+            # DISPLAY_LATEST_FRAME=1 the freshest captured frame is used instead.
+            if last_tracks is not None and (result is not None or display_latest):
+                tracks = last_tracks
+                current_count, in_count, out_count, total_count = last_counts
+                display_frame = (frame if display_latest else result['frame']).copy()
 
                 # Draw detection boxes
                 for x1, y1, x2, y2, track_id in tracks:
