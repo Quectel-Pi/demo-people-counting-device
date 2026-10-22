@@ -93,7 +93,7 @@ python3 ip_camera_main.py
 
 ```bash
 cd ~/demo-people-counting-device/src
-python3 local_video_main.py --video ../asset/street.mp4
+python3 local_video_main.py --video ../assets/street.mp4
 ```
 
 **命令行参数：**
@@ -178,7 +178,7 @@ python3 local_video_main.py --video test_video.mp4
 
 **解决方案：**
 
-- 关闭 ReID 功能（在代码中设置 `use_reid=False`）
+- 启动前关闭 ReID 功能：`export BYTETRACK_USE_REID=0`（或 `BYTETRACK_USE_REID=0 python3 ...`）
 - 降低显示窗口分辨率
 
 ## 报告问题

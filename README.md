@@ -93,7 +93,7 @@ python3 ip_camera_main.py
 
 ```bash
 cd ~/demo-people-counting-device/src
-python3 local_video_main.py --video ../asset/street.mp4
+python3 local_video_main.py --video ../assets/street.mp4
 ```
 
 **Command-line Arguments:**
@@ -177,7 +177,7 @@ The current version uses default middle line and supports custom virtual line po
 
 **Solution:**
 
-- Disable ReID feature (set `use_reid=False` in the code)
+- Disable ReID feature before launch: `export BYTETRACK_USE_REID=0` (or `BYTETRACK_USE_REID=0 python3 ...`)
 - Reduce display window resolution
 
 
